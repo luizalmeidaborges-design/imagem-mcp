@@ -10,7 +10,7 @@
 // Confira os nomes com `npx wrangler ai models list` — a Cloudflare aposenta modelos.
 const MODELOS = {
   gerar: "@cf/black-forest-labs/flux-1-schnell",
-  editar: "@cf/runwayml/stable-diffusion-v1-5-img2img",
+  editar: "@cf/black-forest-labs/flux-2-klein-4b", // edição por instrução, imagens de entrada até 512 px
   inpaint: "@cf/runwayml/stable-diffusion-v1-5-inpainting",
 };
 
@@ -36,19 +36,12 @@ const FERRAMENTAS = [
   {
     name: "editar_imagem",
     description:
-      "Edita a imagem inteira guiada por texto (img2img, Stable Diffusion 1.5): muda estilo, iluminação, clima, cores. Use o image_id obtido na página de upload, de um resultado anterior, ou repo:arquivo.jpg para imagens da pasta /entradas do repositório.",
+      "Edita uma imagem por instrução em texto (FLUX.2 klein): remover ou trocar objetos, mudar clima, estilo, cores. Ex.: 'remove the phone and the shoe, keep everything else'. Entrada de até 512 px. image_id vem da página de upload, de um resultado anterior, ou repo:arquivo.jpg da pasta /entradas do repositório.",
     inputSchema: {
       type: "object",
       properties: {
         image_id: { type: "string" },
-        prompt: { type: "string", description: "Como a imagem deve ficar, de preferência em inglês." },
-        negative_prompt: { type: "string" },
-        intensidade: {
-          type: "number",
-          minimum: 0.1,
-          maximum: 1,
-          description: "Quanto se afasta do original (0.3 sutil, 0.8 forte). Padrão 0.6.",
-        },
+        prompt: { type: "string", description: "Instrução de edição, de preferência em inglês." },
       },
       required: ["image_id", "prompt"],
     },
@@ -153,13 +146,13 @@ async function executarFerramenta(nome, args, env, base) {
   } else if (nome === "editar_imagem") {
     exigir(args.image_id, "image_id");
     exigir(args.prompt, "prompt");
-    const img = await lerEntrada(env, args.image_id);
+    const buf = await lerBytes(env, args.image_id);
+    const form = new FormData();
+    form.append("input_image_0", new Blob([buf], { type: detectarTipo(new Uint8Array(buf)) }));
+    form.append("prompt", args.prompt);
+    const corpo = new Response(form);
     const r = await env.AI.run(MODELOS.editar, {
-      prompt: args.prompt,
-      negative_prompt: args.negative_prompt ?? "",
-      image: img,
-      strength: limitar(args.intensidade ?? 0.6, 0.1, 1),
-      num_steps: 20,
+      multipart: { body: corpo.body, contentType: corpo.headers.get("content-type") },
     });
     saida = await normalizarSaida(r);
   } else if (nome === "substituir_area") {
@@ -220,6 +213,11 @@ async function normalizarSaida(r) {
 }
 
 async function lerEntrada(env, id) {
+  // Os modelos SD do Workers AI recebem a imagem como array de inteiros (bytes).
+  return Array.from(new Uint8Array(await lerBytes(env, id)));
+}
+
+async function lerBytes(env, id) {
   let buf;
   if (id.startsWith("repo:")) {
     // Imagens versionadas em /entradas no GitHub, publicadas como assets do Worker.
@@ -233,8 +231,7 @@ async function lerEntrada(env, id) {
     buf = await env.IMAGENS.get(`img:${id}`, "arrayBuffer");
   }
   if (!buf) throw new Error(`Imagem ${id} não encontrada ou expirada. Envie de novo pela página de upload.`);
-  // Os modelos SD do Workers AI recebem a imagem como array de inteiros (bytes).
-  return Array.from(new Uint8Array(buf));
+  return buf;
 }
 
 // ---------------- Upload e download ----------------
@@ -296,7 +293,7 @@ const PAGINA_UPLOAD = `<!doctype html>
 </style></head><body><div class="wrap">
 <h2>Enviar imagem</h2>
 <p><input type="file" id="arq" accept="image/*"></p>
-<p><small>A foto é reduzida para no máx. 768 px antes do envio. Para trocar/remover uma área, pinte por cima dela com o dedo.</small></p>
+<p><small>A foto é reduzida para no máx. 512 px antes do envio. Para trocar/remover uma área, pinte por cima dela com o dedo.</small></p>
 <div id="pilha" hidden><canvas id="foto"></canvas><canvas id="pinta"></canvas></div>
 <p id="ctl" hidden>
  <label>Pincel <input type="range" id="pincel" min="8" max="80" value="28"></label><br>
@@ -307,7 +304,7 @@ const PAGINA_UPLOAD = `<!doctype html>
 <div class="ids" id="saida" hidden></div>
 </div>
 <script>
-const MAX=768, foto=document.getElementById('foto'), pinta=document.getElementById('pinta');
+const MAX=512, foto=document.getElementById('foto'), pinta=document.getElementById('pinta');
 const fx=foto.getContext('2d'), px=pinta.getContext('2d'); const mascara=document.createElement('canvas'); const mx=mascara.getContext('2d');
 let pintando=false, pintou=false;
 document.getElementById('arq').onchange=async e=>{
