@@ -28,7 +28,7 @@ const FERRAMENTAS = [
       type: "object",
       properties: {
         prompt: { type: "string", description: "Descrição da imagem, de preferência em inglês." },
-        passos: { type: "integer", minimum: 1, maximum: 8, description: "Passos de inferência (padrão 4)." },
+        passos: { type: "integer", minimum: 1, maximum: 8, description: "Passos de inferência (padrão 8, qualidade máxima)." },
       },
       required: ["prompt"],
     },
@@ -141,7 +141,7 @@ async function executarFerramenta(nome, args, env, base) {
 
   if (nome === "gerar_imagem") {
     exigir(args.prompt, "prompt");
-    const r = await env.AI.run(MODELOS.gerar, { prompt: args.prompt, steps: limitar(args.passos ?? 4, 1, 8) });
+    const r = await env.AI.run(MODELOS.gerar, { prompt: args.prompt, steps: limitar(args.passos ?? 8, 1, 8) });
     saida = await normalizarSaida(r);
   } else if (nome === "editar_imagem") {
     exigir(args.image_id, "image_id");
