@@ -1,0 +1,88 @@
+name: Deploy no Cloudflare
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency: deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      MCP_SECRET: ${{ secrets.MCP_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Conferir segredos do repositório
+        run: |
+          faltando=""
+          [ -z "$CLOUDFLARE_API_TOKEN" ] && faltando="$faltando CLOUDFLARE_API_TOKEN"
+          [ -z "$CLOUDFLARE_ACCOUNT_ID" ] && faltando="$faltando CLOUDFLARE_ACCOUNT_ID"
+          [ -z "$MCP_SECRET" ] && faltando="$faltando MCP_SECRET"
+          if [ -n "$faltando" ]; then
+            echo "::error::Faltam segredos em Settings > Secrets and variables > Actions:$faltando"
+            exit 1
+          fi
+          if [ ${#MCP_SECRET} -lt 24 ]; then
+            echo "::error::MCP_SECRET precisa ter pelo menos 24 caracteres."
+            exit 1
+          fi
+          if ! printf '%s' "$MCP_SECRET" | grep -Eq '^[A-Za-z0-9_-]+$'; then
+            echo "::error::MCP_SECRET deve ter só letras, números, - ou _ (vai na URL)."
+            exit 1
+          fi
+
+      - name: Criar (ou reaproveitar) o KV de imagens
+        run: |
+          lista=$(npx -y wrangler@4 kv namespace list)
+          id=$(printf '%s' "$lista" | node -e '
+            let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+              const j=JSON.parse(s.slice(s.indexOf("[")));
+              const n=j.find(x=>x.title==="imagem-mcp-IMAGENS"||x.title==="IMAGENS");
+              process.stdout.write(n?n.id:"");
+            })')
+          if [ -z "$id" ]; then
+            npx -y wrangler@4 kv namespace create IMAGENS
+            lista=$(npx -y wrangler@4 kv namespace list)
+            id=$(printf '%s' "$lista" | node -e '
+              let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+                const j=JSON.parse(s.slice(s.indexOf("[")));
+                const n=j.find(x=>x.title==="imagem-mcp-IMAGENS"||x.title==="IMAGENS");
+                process.stdout.write(n?n.id:"");
+              })')
+          fi
+          [ -z "$id" ] && { echo "::error::Não foi possível obter o id do KV."; exit 1; }
+          sed -i "s/COLE_O_ID_AQUI/$id/" wrangler.jsonc
+          echo "KV em uso: $id"
+
+      - name: Publicar o Worker
+        id: deploy
+        run: |
+          saida=$(npx -y wrangler@4 deploy 2>&1) || { echo "$saida"; exit 1; }
+          echo "$saida"
+          url=$(printf '%s' "$saida" | grep -Eo 'https://[a-zA-Z0-9.-]+\.workers\.dev' | head -1)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Gravar o segredo no Worker
+        run: printf '%s' "$MCP_SECRET" | npx -y wrangler@4 secret put SECRET
+
+      - name: Resumo
+        run: |
+          {
+            echo "## Conector publicado"
+            echo ""
+            echo "Base: \`${{ steps.deploy.outputs.url }}\`"
+            echo ""
+            echo "- Endpoint MCP (cole no Claude): \`${{ steps.deploy.outputs.url }}/SEU_MCP_SECRET/mcp\`"
+            echo "- Página de upload: \`${{ steps.deploy.outputs.url }}/SEU_MCP_SECRET/\`"
+            echo ""
+            echo "Troque SEU_MCP_SECRET pelo valor que você salvou no segredo MCP_SECRET (ele não é exibido aqui por segurança)."
+          } >> "$GITHUB_STEP_SUMMARY"

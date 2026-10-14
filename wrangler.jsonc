@@ -1,0 +1,10 @@
+{
+  "name": "imagem-mcp",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "ai": { "binding": "AI" },
+  "kv_namespaces": [
+    // Troque pelo id que o comando `npx wrangler kv namespace create IMAGENS` mostrar
+    { "binding": "IMAGENS", "id": "COLE_O_ID_AQUI" }
+  ]
+}
