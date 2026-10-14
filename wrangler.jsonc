@@ -3,6 +3,8 @@
   "main": "src/index.js",
   "compatibility_date": "2026-10-01",
   "ai": { "binding": "AI" },
+  // Fotos enviadas pelo chat ficam em /entradas. run_worker_first impede que sejam servidas sem a senha.
+  "assets": { "directory": "./entradas", "binding": "ASSETS", "run_worker_first": true },
   "kv_namespaces": [
     // KV "IMAGENS" criado no painel da Cloudflare
     { "binding": "IMAGENS", "id": "5ead1d3f88114bbb93510dfafd1e144d" }

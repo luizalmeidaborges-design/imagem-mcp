@@ -36,7 +36,7 @@ const FERRAMENTAS = [
   {
     name: "editar_imagem",
     description:
-      "Edita a imagem inteira guiada por texto (img2img, Stable Diffusion 1.5): muda estilo, iluminação, clima, cores. Use o image_id obtido na página de upload ou de um resultado anterior.",
+      "Edita a imagem inteira guiada por texto (img2img, Stable Diffusion 1.5): muda estilo, iluminação, clima, cores. Use o image_id obtido na página de upload, de um resultado anterior, ou repo:arquivo.jpg para imagens da pasta /entradas do repositório.",
     inputSchema: {
       type: "object",
       properties: {
@@ -56,7 +56,7 @@ const FERRAMENTAS = [
   {
     name: "substituir_area",
     description:
-      "Remove ou substitui só a área pintada na máscara (inpainting). Exige image_id e mask_id enviados juntos pela página de upload. O prompt descreve o que deve aparecer no lugar (ex.: 'cobblestone pavement').",
+      "Remove ou substitui só a área pintada na máscara (inpainting). Exige image_id e mask_id (da página de upload ou repo:arquivo.png da pasta /entradas; máscara branca = área a trocar, mesmo tamanho da imagem). O prompt descreve o que deve aparecer no lugar (ex.: 'cobblestone pavement').",
     inputSchema: {
       type: "object",
       properties: {
@@ -220,7 +220,18 @@ async function normalizarSaida(r) {
 }
 
 async function lerEntrada(env, id) {
-  const buf = await env.IMAGENS.get(`img:${id}`, "arrayBuffer");
+  let buf;
+  if (id.startsWith("repo:")) {
+    // Imagens versionadas em /entradas no GitHub, publicadas como assets do Worker.
+    const nome = id.slice(5);
+    if (!/^[\w.-]+$/.test(nome)) throw new Error("Nome de arquivo inválido.");
+    if (!env.ASSETS) throw new Error("Assets não configurados no Worker.");
+    const r = await env.ASSETS.fetch(new Request(`https://assets.local/${nome}`));
+    if (!r.ok) throw new Error(`Arquivo ${nome} não está em /entradas (o deploy já terminou?).`);
+    buf = await r.arrayBuffer();
+  } else {
+    buf = await env.IMAGENS.get(`img:${id}`, "arrayBuffer");
+  }
   if (!buf) throw new Error(`Imagem ${id} não encontrada ou expirada. Envie de novo pela página de upload.`);
   // Os modelos SD do Workers AI recebem a imagem como array de inteiros (bytes).
   return Array.from(new Uint8Array(buf));
