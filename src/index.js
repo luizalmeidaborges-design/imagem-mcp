@@ -17,6 +17,7 @@ const MODELOS = {
 const VERSOES_MCP = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const TTL_SEGUNDOS = 60 * 60 * 24; // imagens expiram em 24 h
 const MAX_BYTES_ENTRADA = 2 * 1024 * 1024;
+const MAX_BYTES_INLINE = 1.5 * 1024 * 1024;
 
 const FERRAMENTAS = [
   {
@@ -132,8 +133,8 @@ async function despachar(msg, env, base) {
       return ok({ tools: FERRAMENTAS });
     case "tools/call":
       try {
-        const texto = await executarFerramenta(msg.params?.name, msg.params?.arguments ?? {}, env, base);
-        return ok({ content: [{ type: "text", text: texto }] });
+        const content = await executarFerramenta(msg.params?.name, msg.params?.arguments ?? {}, env, base);
+        return ok({ content });
       } catch (e) {
         return ok({ content: [{ type: "text", text: `Falha: ${e.message}` }], isError: true });
       }
@@ -183,7 +184,22 @@ async function executarFerramenta(nome, args, env, base) {
     expirationTtl: TTL_SEGUNDOS,
     metadata: { type: saida.tipo },
   });
-  return `Imagem pronta (${saida.tipo}, válida por 24 h).\nLink: ${base}/img/${id}\nimage_id para nova edição: ${id}`;
+  const texto = `Imagem pronta (${saida.tipo}, válida por 24 h).\nLink: ${base}/img/${id}\nimage_id para nova edição: ${id}`;
+  const content = [{ type: "text", text: texto }];
+  // Devolve a imagem embutida para aparecer direto no chat (limite p/ não estourar a resposta).
+  const bytes = new Uint8Array(saida.bytes);
+  if (bytes.byteLength <= MAX_BYTES_INLINE) {
+    content.push({ type: "image", data: paraBase64(bytes), mimeType: saida.tipo });
+  }
+  return content;
+}
+
+function paraBase64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
 }
 
 // Os modelos devolvem formatos diferentes: FLUX -> { image: base64 }, SD -> stream binário PNG.
