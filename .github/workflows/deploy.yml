@@ -1,8 +1,7 @@
 name: Deploy no Cloudflare
 
+# Alternativa ao deploy pela Cloudflare (Workers Builds). Só roda manualmente.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 concurrency: deploy
