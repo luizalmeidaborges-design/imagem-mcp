@@ -9,7 +9,7 @@
 
 // Confira os nomes com `npx wrangler ai models list` — a Cloudflare aposenta modelos.
 const MODELOS = {
-  gerar: "@cf/black-forest-labs/flux-1-schnell",
+  gerar: "@cf/black-forest-labs/flux-2-klein-4b", // texto -> imagem, até 4 MP
   editar: "@cf/black-forest-labs/flux-2-klein-4b", // edição por instrução, imagens de entrada até 512 px
   inpaint: "@cf/runwayml/stable-diffusion-v1-5-inpainting",
 };
@@ -17,18 +17,24 @@ const MODELOS = {
 const VERSOES_MCP = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const TTL_SEGUNDOS = 60 * 60 * 24; // imagens expiram em 24 h
 const MAX_BYTES_ENTRADA = 2 * 1024 * 1024;
-const MAX_BYTES_INLINE = 1.5 * 1024 * 1024;
+const MAX_BYTES_INLINE = 4 * 1024 * 1024;
+const MAX_PIXELS = 3_900_000; // FLUX.2 aceita até 4 MP de saída
+const FORMATOS = { quadrado: 1, vertical: 3 / 4, horizontal: 4 / 3, retrato: 9 / 16, paisagem: 16 / 9 };
 
 const FERRAMENTAS = [
   {
     name: "gerar_imagem",
     description:
-      "Gera uma imagem nova a partir de um texto (FLUX.1 schnell). Escreva o prompt em inglês para melhores resultados. Retorna um link para baixar a imagem e o id dela.",
+      "Gera uma imagem nova a partir de texto (FLUX.2 klein), na maior resolução possível (~3,9 MP, até 2048 px no lado maior). Escreva o prompt em inglês para melhores resultados.",
     inputSchema: {
       type: "object",
       properties: {
         prompt: { type: "string", description: "Descrição da imagem, de preferência em inglês." },
-        passos: { type: "integer", minimum: 1, maximum: 8, description: "Passos de inferência (padrão 8, qualidade máxima)." },
+        formato: {
+          type: "string",
+          enum: Object.keys(FORMATOS),
+          description: "Proporção da imagem (padrão quadrado). vertical=3:4, horizontal=4:3, retrato=9:16, paisagem=16:9.",
+        },
       },
       required: ["prompt"],
     },
@@ -36,7 +42,7 @@ const FERRAMENTAS = [
   {
     name: "editar_imagem",
     description:
-      "Edita uma imagem por instrução em texto (FLUX.2 klein): remover ou trocar objetos, mudar clima, estilo, cores. Ex.: 'remove the phone and the shoe, keep everything else'. Entrada de até 512 px. image_id vem da página de upload, de um resultado anterior, ou repo:arquivo.jpg da pasta /entradas do repositório.",
+      "Edita uma imagem por instrução em texto (FLUX.2 klein): remover ou trocar objetos, mudar clima, estilo, cores. Ex.: 'remove the phone and the shoe, keep everything else'. Entrada de até 512 px; saída na maior resolução possível mantendo a proporção da foto. image_id vem da página de upload, de um resultado anterior, ou repo:arquivo.jpg da pasta /entradas do repositório.",
     inputSchema: {
       type: "object",
       properties: {
@@ -141,20 +147,15 @@ async function executarFerramenta(nome, args, env, base) {
 
   if (nome === "gerar_imagem") {
     exigir(args.prompt, "prompt");
-    const r = await env.AI.run(MODELOS.gerar, { prompt: args.prompt, steps: limitar(args.passos ?? 8, 1, 8) });
-    saida = await normalizarSaida(r);
+    const { w, h } = tamanhoAlvo(FORMATOS[args.formato] ?? 1);
+    saida = await rodarFlux2(env, MODELOS.gerar, args.prompt, [], w, h);
   } else if (nome === "editar_imagem") {
     exigir(args.image_id, "image_id");
     exigir(args.prompt, "prompt");
     const buf = await lerBytes(env, args.image_id);
-    const form = new FormData();
-    form.append("input_image_0", new Blob([buf], { type: detectarTipo(new Uint8Array(buf)) }));
-    form.append("prompt", args.prompt);
-    const corpo = new Response(form);
-    const r = await env.AI.run(MODELOS.editar, {
-      multipart: { body: corpo.body, contentType: corpo.headers.get("content-type") },
-    });
-    saida = await normalizarSaida(r);
+    const dim = dimensoes(new Uint8Array(buf));
+    const { w, h } = tamanhoAlvo(dim ? dim.w / dim.h : 1);
+    saida = await rodarFlux2(env, MODELOS.editar, args.prompt, [buf], w, h);
   } else if (nome === "substituir_area") {
     exigir(args.image_id, "image_id");
     exigir(args.mask_id, "mask_id");
@@ -193,6 +194,54 @@ function paraBase64(bytes) {
     bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
   }
   return btoa(bin);
+}
+
+// FLUX.2 no Workers AI recebe multipart: prompt, width, height e input_image_0..3.
+async function rodarFlux2(env, modelo, prompt, imagens, w, h) {
+  const form = new FormData();
+  form.append("prompt", prompt);
+  form.append("width", String(w));
+  form.append("height", String(h));
+  imagens.forEach((buf, i) => {
+    form.append(`input_image_${i}`, new Blob([buf], { type: detectarTipo(new Uint8Array(buf)) }));
+  });
+  const corpo = new Response(form);
+  const r = await env.AI.run(modelo, {
+    multipart: { body: corpo.body, contentType: corpo.headers.get("content-type") },
+  });
+  return normalizarSaida(r);
+}
+
+// Maior tamanho com a proporção pedida, dentro de MAX_PIXELS, lados múltiplos de 16 e <= 2048.
+function tamanhoAlvo(proporcao) {
+  const r = Math.min(4, Math.max(0.25, proporcao || 1));
+  let h = Math.sqrt(MAX_PIXELS / r);
+  let w = h * r;
+  const k = Math.min(1, 2048 / Math.max(w, h));
+  w = Math.floor((w * k) / 16) * 16;
+  h = Math.floor((h * k) / 16) * 16;
+  return { w, h };
+}
+
+// Lê largura/altura do cabeçalho JPEG ou PNG.
+function dimensoes(b) {
+  if (b[0] === 0x89 && b[1] === 0x50) {
+    const v = new DataView(b.buffer, b.byteOffset);
+    return { w: v.getUint32(16), h: v.getUint32(20) };
+  }
+  if (b[0] === 0xff && b[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < b.length) {
+      if (b[i] !== 0xff) { i++; continue; }
+      const m = b[i + 1];
+      const len = (b[i + 2] << 8) | b[i + 3];
+      if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) {
+        return { h: (b[i + 5] << 8) | b[i + 6], w: (b[i + 7] << 8) | b[i + 8] };
+      }
+      i += 2 + len;
+    }
+  }
+  return null;
 }
 
 // Os modelos devolvem formatos diferentes: FLUX -> { image: base64 }, SD -> stream binário PNG.
